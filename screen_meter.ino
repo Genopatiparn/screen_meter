@@ -18,6 +18,7 @@ lv_obj_t * label_status;
 lv_obj_t * label_clock;
 lv_obj_t * label_date;
 
+bool time_synced = false;
 // === ฟังก์ชันสำหรับสร้าง UI หน้าจอหลัก ===
 void build_meter_ui() {
   lv_obj_t * scr = lv_scr_act();
@@ -177,10 +178,42 @@ void sync_time_from_ntp() {
   
   PCF85063_Set_All(rtc_time);
   Serial.println("RTC updated from NTP!");
+  time_synced = true;
   
   delay(100);
 }
-// === ฟังก์ชันเชื่อมต่อ WiFi และแสดงผลสถานะบนหน้าจอ ===
+
+void save_meter_data(float kwh, float water) {
+  if (!time_synced) {
+    Serial.println("Time not synced yet, skip saving");
+    return;
+  }
+
+  datetime_t current_time;
+  PCF85063_Read_Time(&current_time);
+  
+  char filename[50];
+  sprintf(filename, "/meter_%04d%02d%02d.txt", 
+          current_time.year, current_time.month, current_time.day);
+  
+  File file = SD_MMC.open(filename, FILE_APPEND);
+  if (!file) {
+    Serial.println("Failed to open file for writing");
+    return;
+  }
+  
+  char buffer[200];
+  sprintf(buffer, "%04d-%02d-%02d %02d:%02d:%02d,%.2f,%.2f\n",
+          current_time.year, current_time.month, current_time.day,
+          current_time.hour, current_time.minute, current_time.second,
+          kwh, water);
+  
+  file.print(buffer);
+  file.close();
+  Serial.printf("Data saved: %s", buffer);
+}
+
+// === ฟังก์ชันจัดการอัปเดตข้อมูลตัวเลข ===
 void connect_wifi_to_ui() {
   if (label_status != NULL) {
     lv_label_set_text(label_status, LV_SYMBOL_WIFI " Connecting to WiFi...");
@@ -270,10 +303,9 @@ void setup() {
 
   Waveshare_Init_All();
   
-  // เริ่มต้น RTC
   PCF85063_Init();
+  SD_Init();
   
-  // 1. วาด UI ขึ้นจอก่อน
   build_meter_ui();
 
   // 2. เรียกใช้ระบบเชื่อมต่อ WiFi และ sync เวลา
@@ -286,10 +318,12 @@ void setup() {
 void loop() {
   lv_timer_handler();
 
-  static float mock_value = 123456.78;  // 6 หลัก
-  static float mock_water_value = 1234.56;  // 4 หลัก
+  static float mock_value = 123456.78;
+  static float mock_water_value = 1234.56;
   static unsigned long last_update = 0;
   static unsigned long last_wifi_check = 0;
+  static unsigned long last_meter_update = 0;
+  static unsigned long last_save = 0;
 
   unsigned long current_time = millis();
   
@@ -325,12 +359,20 @@ void loop() {
     }
   }
 
-  // อัปเดตตัวเลขแบบจำลองไปเรื่อยๆ
-  update_kwh_display(mock_value);
-  update_water_display(mock_water_value);
+  if (current_time - last_meter_update >= 1000) {
+    last_meter_update = current_time;
+    
+    update_kwh_display(mock_value);
+    update_water_display(mock_water_value);
 
-  mock_value += 0.01;
-  mock_water_value += 0.05;
+    mock_value += 0.01;
+    mock_water_value += 0.01;
+  }
+
+  if (current_time - last_save >= 3600000) {
+    last_save = current_time;
+    save_meter_data(mock_value, mock_water_value);
+  }
 
   delay(10); 
 }
