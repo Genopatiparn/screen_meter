@@ -2,7 +2,6 @@
 #include <WiFi.h>
 #include <time.h>
 
-// --- ตั้งค่า WiFi ของคุณตรงนี้ ---
 const char* ssid = "ECUSHOP_OFFICE";
 const char* password = "0835712428";
 
@@ -11,7 +10,7 @@ const char* ntpServer = "time.navy.mi.th";
 const long gmtOffset_sec = 7 * 3600;  // GMT+7 สำหรับประเทศไทย
 const int daylightOffset_sec = 0;     // ไม่มี daylight saving
 
-// สร้าง Global Variable ไว้สำหรับอัปเดตค่าตัวเลขบนหน้าจอภายหลัง
+// Global Variable สำหรับอัปเดตค่าตัวเลขบนหน้าจอ
 lv_obj_t * label_kwh_value;
 lv_obj_t * label_water_value;
 lv_obj_t * label_status;
@@ -146,7 +145,7 @@ void sync_time_from_ntp() {
   // ตั้งค่า NTP
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   
-  // รอให้ได้เวลาจาก NTP (timeout 10 วินาที)
+  // รอให้ได้เวลาจาก NTP 
   struct tm timeinfo;
   int attempts = 0;
   while (!getLocalTime(&timeinfo) && attempts < 20) {
@@ -193,22 +192,40 @@ void save_meter_data(float kwh, float water) {
   PCF85063_Read_Time(&current_time);
   
   char filename[50];
-  sprintf(filename, "/meter_%04d%02d%02d.txt", 
+  sprintf(filename, "/0001_%04d%02d%02d.csv", 
           current_time.year, current_time.month, current_time.day);
+  
+  // ตรวจสอบว่า SD card พร้อมใช้งานหรือไม่
+  if (!SD_MMC.begin()) {
+    SD_Init();  // ลอง init ใหม่
+    delay(500);
+    
+    if (!SD_MMC.begin()) {
+      return;
+    }
+  }
+  
+  // ตรวจสอบว่าไฟล์มีอยู่แล้วหรือไม่ เพื่อเพิ่ม header
+  bool file_exists = SD_MMC.exists(filename);
   
   File file = SD_MMC.open(filename, FILE_APPEND);
   if (!file) {
-    Serial.println("Failed to open file for writing");
     return;
   }
   
+  // ถ้าไฟล์ใหม่ ให้เพิ่ม header
+  if (!file_exists) {
+    file.println("Date,Time,kWh,m3");
+  }
+  
   char buffer[200];
-  sprintf(buffer, "%04d-%02d-%02d %02d:%02d:%02d,%.2f,%.2f\n",
+  sprintf(buffer, "%04d-%02d-%02d,%02d:%02d:%02d,%.2f,%.2f",
           current_time.year, current_time.month, current_time.day,
           current_time.hour, current_time.minute, current_time.second,
           kwh, water);
   
   file.print(buffer);
+  file.flush();  // บังคับให้เขียนลง SD card ทันที
   file.close();
   Serial.printf("Data saved: %s", buffer);
 }
@@ -218,18 +235,17 @@ void connect_wifi_to_ui() {
   if (label_status != NULL) {
     lv_label_set_text(label_status, LV_SYMBOL_WIFI " Connecting to WiFi...");
     lv_obj_set_style_text_color(label_status, lv_color_hex(0xFFA500), 0);
-    lv_timer_handler(); // บังคับให้หน้าจอวาดภาพอัปเดตคำว่า Connecting ทันที
+    lv_timer_handler(); 
   }
 
   WiFi.begin(ssid, password);
   
   Serial.print("Connecting to WiFi");
   int attempts = 0;
-  // ลองเชื่อมต่อ 20 ครั้ง (ประมาณ 10 วินาที)
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
     Serial.print(".");
-    lv_timer_handler(); // ให้ LVGL ทำงานเบื้องหลังระหว่างรอ
+    lv_timer_handler();
     attempts++;
   }
 
@@ -259,24 +275,23 @@ void connect_wifi_to_ui() {
 }
 
 // === ฟังก์ชันจัดการอัปเดตข้อมูลตัวเลข ===
-void update_kwh_display(float value) {
+void update_kwh_display(double value) {
   if (label_kwh_value != NULL) {
     char buf[32];
     // แยกส่วนจำนวนเต็มและทศนิยม
     int integer_part = (int)value;
     int decimal_part = (int)((value - integer_part) * 100);
-    sprintf(buf, "%06d.%02d", integer_part, decimal_part);  // 6 หลัก + . + 2 หลัก
+    snprintf(buf, sizeof(buf), "%06d.%02d", integer_part, decimal_part);  // 6 หลัก + . + 2 หลัก
     lv_label_set_text(label_kwh_value, buf);
   }
 }
 
-void update_water_display(float value) {
+void update_water_display(double value) {
   if (label_water_value != NULL) {
     char buf[32];
-    // แยกส่วนจำนวนเต็มและทศนิยม
     int integer_part = (int)value;
     int decimal_part = (int)((value - integer_part) * 100);
-    sprintf(buf, "%04d.%02d", integer_part, decimal_part);  // 4 หลัก + . + 2 หลัก
+    snprintf(buf, sizeof(buf), "%04d.%02d", integer_part, decimal_part);  // 4 หลัก + . + 2 หลัก
     lv_label_set_text(label_water_value, buf);
   }
 }
@@ -284,7 +299,7 @@ void update_water_display(float value) {
 void update_clock_display(int hours, int minutes, int seconds) {
   if (label_clock != NULL) {
     char buf[16];
-    sprintf(buf, "%02d:%02d:%02d", hours, minutes, seconds);
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hours, minutes, seconds);
     lv_label_set_text(label_clock, buf);
   }
 }
@@ -292,7 +307,7 @@ void update_clock_display(int hours, int minutes, int seconds) {
 void update_date_display(int day, int month, int year) {
   if (label_date != NULL) {
     char buf[16];
-    sprintf(buf, "%02d/%02d/%04d", day, month, year);
+    snprintf(buf, sizeof(buf), "%02d/%02d/%04d", day, month, year);
     lv_label_set_text(label_date, buf);
   }
 }
@@ -314,12 +329,10 @@ void setup() {
   Serial.println("Setup complete!");
 }
 
-// === ฟังก์ชัน loop() ทำงานวนซ้ำ ===
 void loop() {
   lv_timer_handler();
-
-  static float mock_value = 123456.78;
-  static float mock_water_value = 1234.56;
+  static double mock_value = 123456.78;
+  static double mock_water_value = 1234.56;
   static unsigned long last_update = 0;
   static unsigned long last_wifi_check = 0;
   static unsigned long last_meter_update = 0;
@@ -327,7 +340,7 @@ void loop() {
 
   unsigned long current_time = millis();
   
-  // อัปเดตเวลาและวันที่ทุกวินาที
+  // อัปเดตเวลาและวันที่
   if (current_time - last_update >= 1000) {
     last_update = current_time;
     
@@ -344,14 +357,11 @@ void loop() {
     
     if (label_status != NULL) {
       if (WiFi.status() == WL_CONNECTED) {
-        // แสดงสถานะเชื่อมต่อสำเร็จ
         lv_label_set_text(label_status, LV_SYMBOL_WIFI " Connected");
         lv_obj_set_style_text_color(label_status, lv_color_hex(0x00FF00), 0);
       } else {
-        // แสดงสถานะขาดการเชื่อมต่อ (ใช้เวลาจาก RTC)
         lv_label_set_text(label_status, LV_SYMBOL_WARNING " WiFi Disconnected");
         lv_obj_set_style_text_color(label_status, lv_color_hex(0xFF0000), 0);
-        
         // พยายามเชื่อมต่อใหม่
         Serial.println("WiFi disconnected, reconnecting...");
         WiFi.reconnect();
@@ -365,12 +375,14 @@ void loop() {
     update_kwh_display(mock_value);
     update_water_display(mock_water_value);
 
-    mock_value += 0.01;
-    mock_water_value += 0.01;
+    // จำลองการเพิ่มขึ้นของมิเตอร์
+    mock_value += 0.005555;
+    mock_water_value += 0.002778;
   }
 
-  if (current_time - last_save >= 3600000) {
+  if (current_time - last_save >= 3600000) {  
     last_save = current_time;
+    Serial.println(" Saving data to SD card...");
     save_meter_data(mock_value, mock_water_value);
   }
 
