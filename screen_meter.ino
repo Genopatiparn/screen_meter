@@ -136,11 +136,8 @@ void build_meter_ui() {
 // === ฟังก์ชันดึงเวลาจาก NTP และเซ็ตให้ RTC ===
 void sync_time_from_ntp() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected, cannot sync time");
     return;
   }
-
-  Serial.println("Syncing time from NTP server...");
   
   // ตั้งค่า NTP
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
@@ -150,21 +147,13 @@ void sync_time_from_ntp() {
   int attempts = 0;
   while (!getLocalTime(&timeinfo) && attempts < 20) {
     delay(500);
-    Serial.print(".");
     lv_timer_handler();
     attempts++;
   }
   
   if (attempts >= 20) {
-    Serial.println("\nFailed to get time from NTP");
     return;
   }
-  
-  Serial.println("\nTime synced from NTP!");
-  Serial.printf("NTP Time: %04d-%02d-%02d %02d:%02d:%02d\n",
-                timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-  
   // เซ็ตเวลาให้ RTC
   datetime_t rtc_time;
   rtc_time.year = timeinfo.tm_year + 1900;
@@ -176,15 +165,99 @@ void sync_time_from_ntp() {
   rtc_time.dotw = timeinfo.tm_wday; // 0=Sunday, 1=Monday, ...
   
   PCF85063_Set_All(rtc_time);
-  Serial.println("RTC updated from NTP!");
   time_synced = true;
   
   delay(100);
 }
 
+void load_last_meter_values(float room_kwh[], float room_water[]) {
+  if (!SD_MMC.begin()) {
+    return;
+  }
+  
+  datetime_t current_time;
+  PCF85063_Read_Time(&current_time);
+  
+  // อ่านค่าล่าสุดจากแต่ละห้อง (100 ห้อง)
+  for (int room = 1; room <= 100; room++) {
+    char filename[50];
+    sprintf(filename, "/%04d_%04d%02d%02d.csv", 
+            room, current_time.year, current_time.month, current_time.day);
+    
+    if (!SD_MMC.exists(filename)) {
+      continue;
+    }
+    
+    File file = SD_MMC.open(filename, FILE_READ);
+    if (!file) {
+      continue;
+    }
+    
+    // อ่านบรรทัดสุดท้าย
+    String lastLine = "";
+    while (file.available()) {
+      String line = file.readStringUntil('\n');
+      if (line.length() > 10 && line.indexOf(',') > 0) {
+        lastLine = line;
+      }
+    }
+    file.close();
+    
+    // แยกค่า kWh และ m3 จากบรรทัดสุดท้าย
+    if (lastLine.length() > 0) {
+      int comma1 = lastLine.indexOf(',');
+      int comma2 = lastLine.indexOf(',', comma1 + 1);
+      int comma3 = lastLine.indexOf(',', comma2 + 1);
+      
+      if (comma3 > 0) {
+        String kwhStr = lastLine.substring(comma2 + 1, comma3);
+        String waterStr = lastLine.substring(comma3 + 1);
+        
+        room_kwh[room - 1] = kwhStr.toFloat();
+        room_water[room - 1] = waterStr.toFloat();
+      }
+    }
+  }
+}
+
+void save_meter_data_for_room(int room_number, float kwh, float water) {
+  if (!time_synced) {
+    return;
+  }
+
+  datetime_t current_time;
+  PCF85063_Read_Time(&current_time);
+  
+  char filename[50];
+  sprintf(filename, "/%04d_%04d%02d%02d.csv", 
+          room_number, current_time.year, current_time.month, current_time.day);
+  
+  // ตรวจสอบว่าไฟล์มีอยู่แล้วหรือไม่
+  bool file_exists = SD_MMC.exists(filename);
+  
+  File file = SD_MMC.open(filename, FILE_APPEND);
+  if (!file) {
+    return;
+  }
+  
+  // ถ้าไฟล์ใหม่ ให้เพิ่ม header
+  if (!file_exists) {
+    file.println("Date,Time,kWh,m3");
+  }
+  
+  char buffer[200];
+  sprintf(buffer, "%04d-%02d-%02d,%02d:%02d:%02d,%.2f,%.2f",
+          current_time.year, current_time.month, current_time.day,
+          current_time.hour, current_time.minute, current_time.second,
+          kwh, water);
+  
+  file.println(buffer);
+  file.flush();
+  file.close();
+}
+
 void save_meter_data(float kwh, float water) {
   if (!time_synced) {
-    Serial.println("Time not synced yet, skip saving");
     return;
   }
 
@@ -227,7 +300,7 @@ void save_meter_data(float kwh, float water) {
   file.print(buffer);
   file.flush();  // บังคับให้เขียนลง SD card ทันที
   file.close();
-  Serial.printf("Data saved: %s", buffer);
+
 }
 
 // === ฟังก์ชันจัดการอัปเดตข้อมูลตัวเลข ===
@@ -239,19 +312,15 @@ void connect_wifi_to_ui() {
   }
 
   WiFi.begin(ssid, password);
-  
-  Serial.print("Connecting to WiFi");
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
-    Serial.print(".");
     lv_timer_handler();
     attempts++;
   }
 
   // อัปเดตหน้าจอเมื่อรู้ผลการเชื่อมต่อ
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi Connected!");
     if (label_status != NULL) {
       lv_label_set_text(label_status, LV_SYMBOL_WIFI " Syncing Time...");
       lv_obj_set_style_text_color(label_status, lv_color_hex(0xFFA500), 0);
@@ -266,7 +335,6 @@ void connect_wifi_to_ui() {
       lv_obj_set_style_text_color(label_status, lv_color_hex(0x00FF00), 0); // เปลี่ยนเป็นสีเขียว
     }
   } else {
-    Serial.println("\nWiFi Failed!");
     if (label_status != NULL) {
       lv_label_set_text(label_status, LV_SYMBOL_WARNING " WiFi Disconnected");
       lv_obj_set_style_text_color(label_status, lv_color_hex(0xFF0000), 0); // เปลี่ยนเป็นสีแดง
@@ -315,32 +383,42 @@ void update_date_display(int day, int month, int year) {
 // === ฟังก์ชัน setup() เริ่มต้นระบบ ===
 void setup() {
   Serial.begin(115200);
-
+  delay(2000);
   Waveshare_Init_All();
-  
   PCF85063_Init();
   SD_Init();
-  
   build_meter_ui();
-
-  // 2. เรียกใช้ระบบเชื่อมต่อ WiFi และ sync เวลา
   connect_wifi_to_ui();
-  
-  Serial.println("Setup complete!");
+
 }
 
 void loop() {
   lv_timer_handler();
-  static double mock_value = 123456.78;
-  static double mock_water_value = 1234.56;
+  
+  // ค่าเริ่มต้นของแต่ละห้อง (100 ห้อง)
+  static float room_kwh[100];
+  static float room_water[100];
+  
+  static bool first_run = true;
+  if (first_run) {
+    // ตั้งค่าเริ่มต้นให้ทุกห้อง
+    for (int i = 0; i < 100; i++) {
+      room_kwh[i] = 100000.0 + (i * 1000);  // ห้อง 1=100000, ห้อง 2=101000, ...
+      room_water[i] = 1000.0 + (i * 10);     // ห้อง 1=1000, ห้อง 2=1010, ...
+    }
+    
+    // โหลดค่าจาก SD card
+    load_last_meter_values(room_kwh, room_water);
+    first_run = false;
+  }
+  
   static unsigned long last_update = 0;
   static unsigned long last_wifi_check = 0;
-  static unsigned long last_meter_update = 0;
   static unsigned long last_save = 0;
 
   unsigned long current_time = millis();
   
-  // อัปเดตเวลาและวันที่
+  // อัปเดตการแสดงผลบนหน้าจอทุกวินาที (แบบ real-time)
   if (current_time - last_update >= 1000) {
     last_update = current_time;
     
@@ -349,6 +427,16 @@ void loop() {
     
     update_clock_display(current_datetime.hour, current_datetime.minute, current_datetime.second);
     update_date_display(current_datetime.day, current_datetime.month, current_datetime.year);
+    
+    // เพิ่มค่าทุกห้อง ทุกวินาที (100 ห้อง)
+    for (int i = 0; i < 100; i++) {
+      room_kwh[i] += 0.01667;  // 1 หน่วย/นาที = 0.01667 หน่วย/วินาที
+      room_water[i] += 0.01667;
+    }
+    
+    // แสดงค่าห้อง 1 บนหน้าจอ
+    update_kwh_display(room_kwh[0]);
+    update_water_display(room_water[0]);
   }
 
   // ตรวจสอบสถานะ WiFi ทุก 5 วินาที
@@ -362,28 +450,33 @@ void loop() {
       } else {
         lv_label_set_text(label_status, LV_SYMBOL_WARNING " WiFi Disconnected");
         lv_obj_set_style_text_color(label_status, lv_color_hex(0xFF0000), 0);
-        // พยายามเชื่อมต่อใหม่
-        Serial.println("WiFi disconnected, reconnecting...");
         WiFi.reconnect();
       }
     }
   }
 
-  if (current_time - last_meter_update >= 1000) {
-    last_meter_update = current_time;
+  // บันทึกข้อมูลทุก 10 นาที (600,000 มิลลิวินาที)
+  if (current_time - last_save >= 600000) {  
     
-    update_kwh_display(mock_value);
-    update_water_display(mock_water_value);
-
-    // จำลองการเพิ่มขึ้นของมิเตอร์
-    mock_value += 0.005555;
-    mock_water_value += 0.002778;
-  }
-
-  if (current_time - last_save >= 3600000) {  
-    last_save = current_time;
-    Serial.println(" Saving data to SD card...");
-    save_meter_data(mock_value, mock_water_value);
+    // Re-initialize SD card ก่อนบันทึก (กรณีถอดแล้วเสียบใหม่)
+    SD_MMC.end();
+    delay(100);
+    if (!SD_MMC.begin()) {
+      SD_Init();
+      delay(200);
+    }
+    
+    // ตรวจสอบว่า SD card พร้อมใช้งานหรือไม่
+    if (SD_MMC.begin()) {
+      // บันทึกข้อมูล 100 ห้อง
+      for (int room = 1; room <= 100; room++) {
+        save_meter_data_for_room(room, room_kwh[room-1], room_water[room-1]);
+        lv_timer_handler();  // ป้องกัน watchdog reset
+        delay(50);
+      }
+      last_save = current_time;  // อัปเดตเวลาเฉพาะเมื่อบันทึกสำเร็จ
+    }
+    // ถ้า SD card ไม่พร้อม จะไม่ update last_save และจะลองใหม่ในรอบถัดไป
   }
 
   delay(10); 
